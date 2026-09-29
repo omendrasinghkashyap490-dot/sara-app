@@ -32,7 +32,14 @@ function getStored(key, fallback) {
 }
 
 function Avatar({ user, size = 'md', ring = false }) {
-  return <img className={`avatar avatar-${size}${ring ? ' avatar-ring' : ''}`} src={user?.avatar_url || photo('photo-1534528741775-53994a69daeb', 120)} alt={`${user?.username || 'User'}'s avatar`} />
+  const label = user?.username || user?.full_name?.trim() || 'User'
+  const initials = label.split(/\s+/).slice(0, 2).map((part) => part[0]?.toUpperCase()).join('')
+  let hash = 0
+  for (const character of String(user?.username || user?.id || 'user')) hash = (hash * 31 + character.charCodeAt(0)) >>> 0
+  const className = `avatar avatar-${size}${ring ? ' avatar-ring' : ''}`
+  return user?.avatar_url
+    ? <img className={className} src={user.avatar_url} alt={`${label}'s avatar`} />
+    : <span className={`${className} avatar-fallback`} style={{ backgroundColor: `hsl(${hash % 360} 32% 84%)` }} aria-label={`${label}'s avatar`}>{initials}</span>
 }
 
 function App() {
@@ -56,6 +63,8 @@ function App() {
   const [commentDraft, setCommentDraft] = useState({})
   const [expandedComments, setExpandedComments] = useState({})
   const [editProfile, setEditProfile] = useState({})
+  const [profileAvatarFile, setProfileAvatarFile] = useState(null)
+  const [profileAvatarPreview, setProfileAvatarPreview] = useState('')
   const [createForm, setCreateForm] = useState({ image_url: '', caption: '' })
   const [imagePreview, setImagePreview] = useState('')
   const [mediaFile, setMediaFile] = useState(null)
@@ -66,9 +75,10 @@ function App() {
   const [reelIndex, setReelIndex] = useState(0)
   const fileInput = useRef(null)
   const authAvatarInput = useRef(null)
+  const profileAvatarInput = useRef(null)
   const objectUrls = useRef([])
 
-  const currentUser = user || { id: 'you', username: 'you', full_name: 'Your name', avatar_url: photo('photo-1534528741775-53994a69daeb', 120), bio: 'Making a little room for wonder.' }
+  const currentUser = user || { id: 'you', username: 'you', full_name: 'Your name', avatar_url: '', bio: 'Making a little room for wonder.' }
   const allPeople = profiles.some((profile) => profile.id === currentUser.id) ? profiles : [currentUser, ...profiles]
   const discoveryPeople = supabase ? allPeople.filter((profile) => profile.id !== currentUser.id) : people
   const todayLabel = new Intl.DateTimeFormat('en-US', { weekday: 'long', month: 'long', day: 'numeric' }).format(new Date()).toUpperCase()
@@ -207,7 +217,7 @@ function App() {
     try {
       if (!supabase) {
         const username = authMode === 'signup' ? authForm.username.trim().toLowerCase() : authForm.identifier.trim().replace(/^@/, '')
-        const demo = { id: 'you', username: username || 'you', full_name: authMode === 'signup' ? authForm.full_name.trim() : 'Your name', avatar_url: authAvatarPreview || photo('photo-1534528741775-53994a69daeb', 120), bio: authMode === 'signup' ? authForm.bio.trim() : '' }
+        const demo = { id: 'you', username: username || 'you', full_name: authMode === 'signup' ? authForm.full_name.trim() : 'Your name', avatar_url: authAvatarPreview || '', bio: authMode === 'signup' ? authForm.bio.trim() : '' }
         setUser(demo); setProfiles((current) => [demo, ...current.filter((profile) => profile.id !== demo.id)])
         localStorage.setItem('SARA-user', JSON.stringify(demo)); setModal(''); return
       }
@@ -308,12 +318,23 @@ function App() {
 
   async function saveProfile(event) {
     event.preventDefault(); setBusy(true)
-    const updated = { ...currentUser, ...editProfile, username: editProfile.username || currentUser.username }
-    if (supabase && user) {
-      const { error } = await supabase.from('profiles').update({ username: updated.username, full_name: updated.full_name, bio: updated.bio, avatar_url: updated.avatar_url }).eq('id', user.id)
-      if (error) { notify(`Could not update profile: ${error.message}`); setBusy(false); return }
+    try {
+      let updated = { ...currentUser, ...editProfile, username: editProfile.username || currentUser.username }
+      if (profileAvatarFile) {
+        updated = supabase && user
+          ? await saveAvatar(updated, profileAvatarFile)
+          : { ...updated, avatar_url: profileAvatarPreview }
+      }
+      if (supabase && user) {
+        const { error } = await supabase.from('profiles').update({ username: updated.username, full_name: updated.full_name, bio: updated.bio, avatar_url: updated.avatar_url }).eq('id', user.id)
+        if (error) throw error
+      }
+      setUser(updated); setSelectedProfile(updated); localStorage.setItem('SARA-user', JSON.stringify(updated)); setProfiles((current) => current.map((profile) => profile.id === updated.id ? updated : profile)); setModal(''); notify('Profile updated.')
+    } catch (error) {
+      notify(`Could not update profile: ${error.message || 'Please try again.'}`)
+    } finally {
+      setProfileAvatarFile(null); setProfileAvatarPreview(''); setBusy(false)
     }
-    setUser(updated); setSelectedProfile(updated); localStorage.setItem('SARA-user', JSON.stringify(updated)); setProfiles((current) => current.map((profile) => profile.id === updated.id ? updated : profile)); setBusy(false); setModal(''); notify('Profile updated.')
   }
 
   async function toggleFollow(profile) {
@@ -347,7 +368,14 @@ function App() {
     } catch { notify('Sharing is not available.') }
   }
 
-  function goTo(view) { setActiveView(view); setSelectedProfile(view === 'Profile' ? currentUser : null); window.scrollTo({ top: 0, behavior: 'smooth' }) }
+  function goTo(view) {
+    if (view === 'Profile' && !user) { setAuthMode('login'); setModal('auth'); return }
+    setActiveView(view); setSelectedProfile(view === 'Profile' ? currentUser : null); window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
+  function openProfile(profile) {
+    if (!user) { setAuthMode('login'); setModal('auth'); return }
+    setSelectedProfile(profile); setActiveView('Profile')
+  }
   function openCreate() { setCreateForm({ image_url: '', caption: '' }); setImagePreview(''); setMediaFile(null); setMediaType('image'); setModal('create') }
 
   const navItems = [
@@ -388,17 +416,17 @@ function App() {
           <section className="feed-column">
             <div className="stories-strip">
               <button className="story-item" onClick={openCreate}><span className="story-ring add-story"><Avatar user={currentUser} size="story" /><i><Plus size={13} /></i></span><span>Your story</span></button>
-              {discoveryPeople.map((person, index) => <button className="story-item" key={person.id} onClick={() => { setSelectedProfile(person); setActiveView('Profile') }}><span className="story-ring" style={{ '--story-color': storyColors[index % storyColors.length] }}><Avatar user={person} size="story" /></span><span>{person.username}</span></button>)}
+              {discoveryPeople.map((person, index) => <button className="story-item" key={person.id} onClick={() => openProfile(person)}><span className="story-ring" style={{ '--story-color': storyColors[index % storyColors.length] }}><Avatar user={person} size="story" /></span><span>{person.username}</span></button>)}
             </div>
             <div className="feed-topline"><div><p className="eyebrow">{todayLabel}</p><h1>Good things, lately<span className="accent-dot">.</span></h1></div><button className="filter-button" onClick={() => notify('You are viewing all recent post.')}><Sparkles size={15} /> For you <ChevronDown size={14} /></button></div>
             {feedLoading && <div className="post-skeletons" aria-label="Loading post">{[0, 1].map((item) => <div className="post-skeleton" key={item}><span /><div /><span /></div>)}</div>}
             {!feedLoading && !post.length && <div className="empty-state"><ImagePlus size={28} /><h3>Your feed is a blank canvas.</h3><p>Follow people or share your first moment.</p><button className="primary-button" onClick={openCreate}>Share a moment</button></div>}
-            {feedpost.map((p, index) => <PostCard key={p.id} post={p} author={p.author || profileFor(p.user_id)} index={index} currentUser={currentUser} commentDraft={commentDraft} setCommentDraft={setCommentDraft} expandedComments={expandedComments} setExpandedComments={setExpandedComments} onLike={toggleLike} onComment={addComment} onShare={sharePost} onProfile={(profile) => { setSelectedProfile(profile); setActiveView('Profile') }} notify={notify} />)}
+            {feedpost.map((p, index) => <PostCard key={p.id} post={p} author={p.author || profileFor(p.user_id)} index={index} currentUser={currentUser} commentDraft={commentDraft} setCommentDraft={setCommentDraft} expandedComments={expandedComments} setExpandedComments={setExpandedComments} onLike={toggleLike} onComment={addComment} onShare={sharePost} onProfile={openProfile} notify={notify} />)}
           </section>
           <aside className="right-rail">
             <div className="welcome-note"><div className="note-top"><span className="note-icon"><Sparkles size={17} /></span><span>YOUR DAILY PAUSE</span><MoreHorizontal size={18} /></div><p>Good things happen when you pay attention.</p><span className="note-signature">Make room for the little things.</span></div>
             <div className="suggestion-heading"><div><h3>People to know</h3><span>A few lovely corners of SARA</span></div><button onClick={() => goTo('Explore')}>See all</button></div>
-            {discoveryPeople.slice(0, 4).map((person, index) => <div className="suggestion-row" key={person.id}><button className="person-link" onClick={() => { setSelectedProfile(person); setActiveView('Profile') }}><Avatar user={person} size="sm" /><span><b>{person.username}</b><small>{index % 2 ? 'Suggested for you' : 'A good corner to visit'}</small></span></button><button className={`follow-button ${follows.includes(person.id) ? 'following' : ''}`} onClick={() => toggleFollow(person)}>{follows.includes(person.id) ? 'Following' : 'Follow'}</button></div>)}
+            {discoveryPeople.slice(0, 4).map((person, index) => <div className="suggestion-row" key={person.id}><button className="person-link" onClick={() => openProfile(person)}><Avatar user={person} size="sm" /><span><b>{person.username}</b><small>{index % 2 ? 'Suggested for you' : 'A good corner to visit'}</small></span></button><button className={`follow-button ${follows.includes(person.id) ? 'following' : ''}`} onClick={() => toggleFollow(person)}>{follows.includes(person.id) ? 'Following' : 'Follow'}</button></div>)}
             <footer className="rail-footer"><button onClick={() => setModal('auth')}>About</button><span>·</span><button onClick={() => notify('Community guidelines.')}>Guidelines</button><span>·</span><button onClick={() => setModal('auth')}>Privacy</button><p>© 2026 SARA</p></footer>
           </aside>
         </div>}
@@ -406,18 +434,18 @@ function App() {
         {activeView === 'Explore' && <section className="page-content explore-page">
           <div className="page-heading"><div><p className="eyebrow">FIND YOUR PEOPLE</p><h1>Explore<span className="accent-dot">.</span></h1></div><span className="explore-counter">{post.length} moments in the mix</span></div>
           <label className="search-box"><Search size={19} /><input className="search-input" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search people, places, little things..." /><kbd>⌘ K</kbd></label>
-          {search && <div className="search-results"><div className="result-label">PEOPLE <span>{matchingProfiles.length}</span></div>{matchingProfiles.slice(0, 5).map((profile) => <button className="search-person" key={profile.id} onClick={() => { setSelectedProfile(profile); setActiveView('Profile') }}><Avatar user={profile} size="sm" /><span><b>{profile.username}</b><small>{profile.full_name}</small></span><ChevronDown size={16} /></button>)}{!matchingProfiles.length && <p className="no-results">No people found.</p>}</div>}
+          {search && <div className="search-results"><div className="result-label">PEOPLE <span>{matchingProfiles.length}</span></div>{matchingProfiles.slice(0, 5).map((profile) => <button className="search-person" key={profile.id} onClick={() => openProfile(profile)}><Avatar user={profile} size="sm" /><span><b>{profile.username}</b><small>{profile.full_name}</small></span><ChevronDown size={16} /></button>)}{!matchingProfiles.length && <p className="no-results">No people found.</p>}</div>}
           <div className="explore-grid">{feedpost.map((p, index) => <button className={`explore-tile tile-${index % 7 === 0 ? 'large' : 'normal'}`} key={p.id} onClick={() => { setActiveView('Home'); setSearch('') }}><PostThumbnail post={p} alt={p.caption || 'Community post'} /><span><Heart size={17} fill="currentColor" /> {p.likes || 0} <MessageCircle size={17} fill="currentColor" /> {p.comments?.length || 0}</span></button>)}</div>
         </section>}
 
-        {activeView === 'Profile' && <section className="page-content profile-page">
+        {activeView === 'Profile' && user && <section className="page-content profile-page">
           {(() => {
             const profile = selectedProfile || currentUser
             const ownProfile = profile.id === currentUser.id
             const profilepost = post.filter((p) => p.user_id === profile.id || p.author?.id === profile.id)
             const stats = profileStats[profile.id]
             return <>
-              <div className="profile-header"><Avatar user={profile} size="profile" /><div className="profile-details"><div className="profile-title"><h1>{profile.username}</h1>{ownProfile ? <button className="soft-button" onClick={() => { setEditProfile(profile); setModal('edit') }}>Edit profile</button> : <button className={`primary-button ${follows.includes(profile.id) ? 'outline-button' : ''}`} onClick={() => toggleFollow(profile)}>{follows.includes(profile.id) ? 'Following' : 'Follow'}</button>}<button className="icon-button small" onClick={() => { setChatUser(profile); setActiveView('Messages') }} aria-label="Message"><MessageCircle size={19} /></button></div>
+              <div className="profile-header"><Avatar user={profile} size="profile" /><div className="profile-details"><div className="profile-title"><h1>{profile.username}</h1>{ownProfile ? <button className="soft-button" onClick={() => { setEditProfile(profile); setProfileAvatarFile(null); setProfileAvatarPreview(''); setModal('edit') }}>Edit profile</button> : <button className={`primary-button ${follows.includes(profile.id) ? 'outline-button' : ''}`} onClick={() => toggleFollow(profile)}>{follows.includes(profile.id) ? 'Following' : 'Follow'}</button>}<button className="icon-button small" onClick={() => { setChatUser(profile); setActiveView('Messages') }} aria-label="Message"><MessageCircle size={19} /></button></div>
                 <div className="profile-stats"><span><b>{stats?.post ?? profilepost.length}</b> post</span><span><b>{stats?.followers ?? 84}</b> followers</span><span><b>{stats?.following ?? follows.length}</b> following</span></div>
                 <div className="profile-bio"><b>{profile.full_name}</b><p>{profile.bio || 'A little collection of everyday things.'}</p></div>
               </div></div>
@@ -428,7 +456,7 @@ function App() {
         </section>}
 
         {activeView === 'Messages' && <section className="page-content messages-page"><div className="messages-window"><div className="chat-sidebar"><div className="chat-sidebar-head"><div><h2>Messages</h2><span>{currentUser.username}</span></div><button className="icon-button small" onClick={() => notify('Start conversation')} aria-label="New message"><MessageSquare size={19} /></button></div><label className="chat-search"><Search size={16} /><input placeholder="Search messages" /></label><p className="chat-section-label">MESSAGES</p>{discoveryPeople.map((person) => <button key={person.id} className={`chat-person ${chatUser?.id === person.id ? 'selected' : ''}`} onClick={() => setChatUser(person)}><span className="chat-avatar-wrap"><Avatar user={person} size="md" /><i /></span><span><b>{person.username}</b><small>{messages[person.id]?.at(-1)?.body || 'Say hello'}</small></span></button>)}</div>
-            <div className="chat-panel">{chatUser ? <><div className="chat-head"><button className="person-link" onClick={() => { setSelectedProfile(chatUser); setActiveView('Profile') }}><Avatar user={chatUser} size="sm" /><span><b>{chatUser.username}</b><small>Active now</small></span></button></div><div className="chat-thread"><div className="chat-intro"><Avatar user={chatUser} size="chat-large" /><h3>{chatUser.full_name}</h3><span>@{chatUser.username}</span><button className="soft-button" onClick={() => { setSelectedProfile(chatUser); setActiveView('Profile') }}>View profile</button></div>{(messages[chatUser.id] || []).map((message) => <div key={message.id} className={`message-bubble ${message.sender_id === currentUser.id ? 'mine' : ''}`}>{message.body}</div>)}</div><form className="message-compose" onSubmit={sendMessage}><button type="button" className="icon-button small" aria-label="Emoji"><Smile size={20} /></button><input name="message" placeholder="Write a message..." autoComplete="off" /><button className="send-button" type="submit" aria-label="Send message"><Send size={18} /></button></form></> : <div className="chat-empty"><MessageCircle size={40} /><h3>Your messages</h3></div>}</div></div></section>}
+            <div className="chat-panel">{chatUser ? <><div className="chat-head"><button className="person-link" onClick={() => openProfile(chatUser)}><Avatar user={chatUser} size="sm" /><span><b>{chatUser.username}</b><small>Active now</small></span></button></div><div className="chat-thread"><div className="chat-intro"><Avatar user={chatUser} size="chat-large" /><h3>{chatUser.full_name}</h3><span>@{chatUser.username}</span><button className="soft-button" onClick={() => openProfile(chatUser)}>View profile</button></div>{(messages[chatUser.id] || []).map((message) => <div key={message.id} className={`message-bubble ${message.sender_id === currentUser.id ? 'mine' : ''}`}>{message.body}</div>)}</div><form className="message-compose" onSubmit={sendMessage}><button type="button" className="icon-button small" aria-label="Emoji"><Smile size={20} /></button><input name="message" placeholder="Write a message..." autoComplete="off" /><button className="send-button" type="submit" aria-label="Send message"><Send size={18} /></button></form></> : <div className="chat-empty"><MessageCircle size={40} /><h3>Your messages</h3></div>}</div></div></section>}
 
         {activeView === 'Reels' && <section className="reels-page"><div className="reels-heading"><div><p className="eyebrow">INSPIRATION</p><h1>Reels<span className="accent-dot">.</span></h1></div></div>{reelItems.length ? <><div className="reels-stage" onScroll={(event) => setReelIndex(Math.min(reelItems.length - 1, Math.round(event.currentTarget.scrollTop / event.currentTarget.clientHeight)))}>{reelItems.map((reel) => <div className="reel-slide" key={reel.id}><ReelCard reel={reel} currentUser={currentUser} notify={notify} onFollow={toggleFollow} following={follows.includes(reel.user.id)} onLike={toggleReelLike} onComment={addReelComment} /></div>)}</div></> : <div className="empty-state"><Video size={28} /><h3>No reels yet.</h3></div>}</section>}
       </main>
@@ -462,7 +490,28 @@ function App() {
         </form>
       </Modal>}
 
-      {modal === 'edit' && <Modal title="Edit profile" onClose={() => setModal('')}><form className="edit-form" onSubmit={saveProfile}><label>Username<input value={editProfile.username || ''} onChange={(event) => setEditProfile((current) => ({ ...current, username: event.target.value }))} required /></label><label>Name<input value={editProfile.full_name || ''} onChange={(event) => setEditProfile((current) => ({ ...current, full_name: event.target.value }))} /></label><label>Bio<textarea value={editProfile.bio || ''} onChange={(event) => setEditProfile((current) => ({ ...current, bio: event.target.value }))} maxLength={150} rows={3} /></label><label>Avatar image URL<input value={editProfile.avatar_url || ''} onChange={(event) => setEditProfile((current) => ({ ...current, avatar_url: event.target.value }))} placeholder="https://..." /></label><button className="primary-button publish-button" disabled={busy}>{busy ? 'Saving...' : 'Save changes'}</button></form></Modal>}
+      {modal === 'edit' && <Modal title="Edit profile" onClose={() => setModal('')}>
+        <form className="edit-form" onSubmit={saveProfile}>
+          <label>Username<input value={editProfile.username || ''} onChange={(event) => setEditProfile((current) => ({ ...current, username: event.target.value }))} required /></label>
+          <label>Name<input value={editProfile.full_name || ''} onChange={(event) => setEditProfile((current) => ({ ...current, full_name: event.target.value }))} /></label>
+          <label>Bio<textarea value={editProfile.bio || ''} onChange={(event) => setEditProfile((current) => ({ ...current, bio: event.target.value }))} maxLength={150} rows={3} /></label>
+          <div className="profile-avatar-editor">
+            <input ref={profileAvatarInput} type="file" accept="image/jpeg,image/png,image/webp" hidden onChange={(event) => {
+              const file = event.target.files?.[0]
+              event.target.value = ''
+              if (!file) return
+              if (file.size > 5 * 1024 * 1024) { notify('Profile photos must be 5 MB or smaller.'); return }
+              setProfileAvatarFile(file)
+              const reader = new FileReader()
+              reader.onload = () => setProfileAvatarPreview(String(reader.result))
+              reader.readAsDataURL(file)
+            }} />
+            <Avatar user={{ ...editProfile, avatar_url: profileAvatarPreview || editProfile.avatar_url }} size="md" />
+            <button type="button" className="soft-button" onClick={() => profileAvatarInput.current?.click()}>{profileAvatarFile ? 'Choose another photo' : 'Choose profile photo'}</button>
+          </div>
+          <button className="primary-button publish-button" disabled={busy}>{busy ? 'Saving...' : 'Save changes'}</button>
+        </form>
+      </Modal>}
 
       {modal === 'auth' && <Modal title={authMode === 'login' ? 'Welcome back' : 'Join SARA'} onClose={() => setModal('')}>
         <form className="auth-form" onSubmit={submitAuth}>
